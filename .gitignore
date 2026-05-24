@@ -17,3 +17,5 @@ server/.env.local
 
 # Allow client production env (contains only public VITE_ vars, no secrets)
 !client/.env.production
+
+.vercel

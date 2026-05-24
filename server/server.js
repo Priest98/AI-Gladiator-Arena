@@ -5,10 +5,15 @@ import rateLimit from 'express-rate-limit';
 import { ethers } from 'ethers';
 import { readDb, writeDb, createGladiatorWallet, getUSDCBalance, getEURCBalance, claimFaucet, transferUSDC, transferEURC, logToGladiatorLedger } from './circleService.js';
 import { runBattle } from './battleEngine.js';
+import { evaluateWagerPolicy, evaluateBattlePolicy, POLICY_RULES } from './battlePolicy.js';
 
 // Arc Faucet: per-address cooldown tracking (24h)
 const faucetCooldowns = new Map(); // address -> last claim timestamp
 const FAUCET_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+// Policy Engine: track gladiators currently in active battles (anti-double-book)
+const activeBattleGladiators = new Set();
+
 
 dotenv.config();
 
@@ -104,6 +109,46 @@ app.get('/api/gladiators', async (req, res) => {
     res.json(updatedGladiators);
   } catch (err) {
     sendSanitizedError(res, err, "Failed to retrieve gladiators.");
+  }
+});
+
+// ── Policy Engine Endpoints ───────────────────────────────────────────────────
+
+// GET /api/policy/stats — returns aggregate APPROVED/BLOCKED counts (like Shadow's dashboard)
+app.get('/api/policy/stats', (req, res) => {
+  try {
+    const db = readDb();
+    const log = db.policyLog || [];
+    const approved = log.filter(e => e.approved).length;
+    const blocked = log.filter(e => !e.approved).length;
+
+    // Breakdown by rule
+    const byRule = {};
+    log.filter(e => !e.approved).forEach(e => {
+      byRule[e.ruleCode] = (byRule[e.ruleCode] || 0) + 1;
+    });
+
+    res.json({
+      total: log.length,
+      approved,
+      blocked,
+      approvalRate: log.length > 0 ? ((approved / log.length) * 100).toFixed(1) + '%' : '0%',
+      blockedByRule: byRule,
+      rules: POLICY_RULES,
+    });
+  } catch (err) {
+    sendSanitizedError(res, err, "Failed to retrieve policy stats.");
+  }
+});
+
+// GET /api/policy/log — returns the last 50 attested policy decisions
+app.get('/api/policy/log', (req, res) => {
+  try {
+    const db = readDb();
+    const log = (db.policyLog || []).slice(0, 50);
+    res.json(log);
+  } catch (err) {
+    sendSanitizedError(res, err, "Failed to retrieve policy log.");
   }
 });
 
@@ -340,7 +385,7 @@ app.post('/api/battles/sandbox', async (req, res) => {
   }
 });
 
-// Trigger a Battle (includes rate limiting and prediction market bet settlement)
+// Trigger a Battle (includes rate limiting, policy engine gating, and prediction market bet settlement)
 app.post('/api/battles', expensiveRateLimiter, async (req, res) => {
   const { gladiatorAId, gladiatorBId } = req.body;
 
@@ -353,66 +398,135 @@ app.post('/api/battles', expensiveRateLimiter, async (req, res) => {
   }
 
   try {
-    // 1. Run the battle
-    const battleRecord = await runBattle(gladiatorAId, gladiatorBId);
-    
-    // 2. Resolve active bets from the prediction market
     const db = readDb();
-    if (db.activeBets && db.activeBets.length > 0) {
-      const winningGladiatorId = battleRecord.winnerId;
-      
-      // Calculate odds for resolution
-      const gladA = db.gladiators.find(g => g.id === gladiatorAId);
-      const gladB = db.gladiators.find(g => g.id === gladiatorBId);
-      
-      if (gladA && gladB) {
-        const scoreA = gladA.stats.attack * 0.4 + gladA.stats.defense * 0.3 + gladA.stats.speed * 0.3;
-        const scoreB = gladB.stats.attack * 0.4 + gladB.stats.defense * 0.3 + gladB.stats.speed * 0.3;
-        const probA = scoreA / (scoreA + scoreB);
-        const probB = 1.0 - probA;
-        const oddsA = parseFloat(((1 - 0.05) / probA).toFixed(2));
-        const oddsB = parseFloat(((1 - 0.05) / probB).toFixed(2));
-        const winnerOdds = winningGladiatorId === gladiatorAId ? oddsA : oddsB;
+    const gladiatorA = db.gladiators.find(g => g.id === gladiatorAId);
+    const gladiatorB = db.gladiators.find(g => g.id === gladiatorBId);
 
-        battleRecord.betPayouts = [];
-
-        db.activeBets.forEach(bet => {
-          if (bet.gladiatorId === winningGladiatorId) {
-            const payoutAmount = parseFloat((bet.amount * winnerOdds).toFixed(2));
-            if (bet.token === 'EURC') {
-              const current = db.ledgerEURC[bet.userAddress] || 0.0;
-              db.ledgerEURC[bet.userAddress] = parseFloat((current + payoutAmount).toFixed(2));
-            } else {
-              const current = db.ledger[bet.userAddress] || 0.0;
-              db.ledger[bet.userAddress] = parseFloat((current + payoutAmount).toFixed(2));
-            }
-            battleRecord.betPayouts.push({
-              userAddress: bet.userAddress,
-              amount: payoutAmount,
-              token: bet.token,
-              won: true
-            });
-          } else {
-            battleRecord.betPayouts.push({
-              userAddress: bet.userAddress,
-              amount: bet.amount,
-              token: bet.token,
-              won: false
-            });
-          }
-        });
-      }
-
-      // Clear bets and save database state
-      db.activeBets = [];
-      writeDb(db);
+    if (!gladiatorA || !gladiatorB) {
+      return res.status(404).json({ error: "One or both gladiators not found" });
     }
 
-    res.json(battleRecord);
+    // ── POLICY ENGINE GATE ──────────────────────────────────────────────────
+    // Evaluate the battle request against all policy rules before execution.
+    // This mirrors Shadow's PilotAttestor — every decision is SHA-256 attested.
+    const lastBattleA = db.battles.filter(b => b.gladiatorAId === gladiatorAId || b.gladiatorBId === gladiatorAId).slice(-1)[0]?.timestamp;
+    const lastBattleB = db.battles.filter(b => b.gladiatorAId === gladiatorBId || b.gladiatorBId === gladiatorBId).slice(-1)[0]?.timestamp;
+
+    const policyResult = evaluateBattlePolicy({
+      gladiatorA,
+      gladiatorB,
+      activeBattleIds: Array.from(activeBattleGladiators),
+      lastBattleTimestampA: lastBattleA,
+      lastBattleTimestampB: lastBattleB,
+    });
+
+    // Log every decision (approved or blocked) to the persistent policy audit trail
+    if (!db.policyLog) db.policyLog = [];
+    const policyEntry = {
+      ...policyResult,
+      gladiatorAName: gladiatorA.name,
+      gladiatorBName: gladiatorB.name,
+      gladiatorAId,
+      gladiatorBId,
+      type: 'BATTLE_INITIATION',
+    };
+    db.policyLog.unshift(policyEntry); // newest first
+    if (db.policyLog.length > 500) db.policyLog = db.policyLog.slice(0, 500); // cap at 500 entries
+    writeDb(db);
+
+    // If blocked, return 403 with the attested decision
+    if (!policyResult.approved) {
+      console.log(`[PolicyEngine] BLOCKED battle ${gladiatorA.name} vs ${gladiatorB.name} — Rule ${policyResult.ruleCode}: ${policyResult.reason}`);
+      return res.status(403).json({
+        error: `Battle blocked by policy engine`,
+        policy: {
+          decision: 'BLOCKED',
+          ruleCode: policyResult.ruleCode,
+          reason: policyResult.reason,
+          sha256: policyResult.sha256,
+          timestamp: policyResult.timestamp,
+        }
+      });
+    }
+
+    console.log(`[PolicyEngine] APPROVED battle ${gladiatorA.name} vs ${gladiatorB.name} — sha256: ${policyResult.sha256.substring(0, 16)}...`);
+    // ── END POLICY ENGINE GATE ──────────────────────────────────────────────
+
+    // Mark gladiators as active in battle (anti-double-book)
+    activeBattleGladiators.add(gladiatorAId);
+    activeBattleGladiators.add(gladiatorBId);
+
+    try {
+      // 1. Run the battle
+      const battleRecord = await runBattle(gladiatorAId, gladiatorBId);
+      battleRecord.policyAttestation = policyResult.sha256;
+      battleRecord.policyApproved = true;
+
+      // 2. Resolve active bets from the prediction market
+      const dbAfter = readDb();
+      if (dbAfter.activeBets && dbAfter.activeBets.length > 0) {
+        const winningGladiatorId = battleRecord.winnerId;
+        
+        // Calculate odds for resolution
+        const gladA = dbAfter.gladiators.find(g => g.id === gladiatorAId);
+        const gladB = dbAfter.gladiators.find(g => g.id === gladiatorBId);
+        
+        if (gladA && gladB) {
+          const scoreA = gladA.stats.attack * 0.4 + gladA.stats.defense * 0.3 + gladA.stats.speed * 0.3;
+          const scoreB = gladB.stats.attack * 0.4 + gladB.stats.defense * 0.3 + gladB.stats.speed * 0.3;
+          const probA = scoreA / (scoreA + scoreB);
+          const probB = 1.0 - probA;
+          const oddsA = parseFloat(((1 - 0.05) / probA).toFixed(2));
+          const oddsB = parseFloat(((1 - 0.05) / probB).toFixed(2));
+          const winnerOdds = winningGladiatorId === gladiatorAId ? oddsA : oddsB;
+
+          battleRecord.betPayouts = [];
+
+          dbAfter.activeBets.forEach(bet => {
+            if (bet.gladiatorId === winningGladiatorId) {
+              const payoutAmount = parseFloat((bet.amount * winnerOdds).toFixed(2));
+              if (bet.token === 'EURC') {
+                const current = dbAfter.ledgerEURC[bet.userAddress] || 0.0;
+                dbAfter.ledgerEURC[bet.userAddress] = parseFloat((current + payoutAmount).toFixed(2));
+              } else {
+                const current = dbAfter.ledger[bet.userAddress] || 0.0;
+                dbAfter.ledger[bet.userAddress] = parseFloat((current + payoutAmount).toFixed(2));
+              }
+              battleRecord.betPayouts.push({
+                userAddress: bet.userAddress,
+                amount: payoutAmount,
+                token: bet.token,
+                won: true
+              });
+            } else {
+              battleRecord.betPayouts.push({
+                userAddress: bet.userAddress,
+                amount: bet.amount,
+                token: bet.token,
+                won: false
+              });
+            }
+          });
+        }
+
+        // Clear bets and save database state
+        dbAfter.activeBets = [];
+        writeDb(dbAfter);
+      }
+
+      res.json(battleRecord);
+    } finally {
+      // Always release gladiators from active battle set
+      activeBattleGladiators.delete(gladiatorAId);
+      activeBattleGladiators.delete(gladiatorBId);
+    }
   } catch (err) {
+    activeBattleGladiators.delete(gladiatorAId);
+    activeBattleGladiators.delete(gladiatorBId);
     sendSanitizedError(res, err, "Battle execution or settlement failed.");
   }
 });
+
 
 // Autonomous Gladiator Upgrade evaluation & execution (includes rate limit checks)
 app.post('/api/gladiators/:id/evaluate-upgrade', expensiveRateLimiter, async (req, res) => {

@@ -80,12 +80,17 @@ export default function App() {
   const [isCreatingTournament, setIsCreatingTournament] = useState(false);
   const [isSteppingTournament, setIsSteppingTournament] = useState(false);
 
+  // Policy Engine State
+  const [policyStats, setPolicyStats] = useState(null);
+  const [policyLog, setPolicyLog] = useState([]);
+
   // Initialize
   useEffect(() => {
     fetchGladiators();
     fetchHistory();
     fetchPredictorBalance();
     fetchActiveTournament();
+    fetchPolicyStats();
     if (window.ethereum) {
       window.ethereum.request({ method: 'eth_accounts' })
         .then(accounts => {
@@ -102,6 +107,19 @@ export default function App() {
       }
     };
   }, []);
+
+  const fetchPolicyStats = async () => {
+    try {
+      const [statsRes, logRes] = await Promise.all([
+        fetch(`${API_BASE}/policy/stats`),
+        fetch(`${API_BASE}/policy/log`),
+      ]);
+      if (statsRes.ok) setPolicyStats(await statsRes.json());
+      if (logRes.ok) setPolicyLog(await logRes.json());
+    } catch (e) { /* silent */ }
+  };
+
+
 
   const fetchPredictorBalance = async () => {
     try {
@@ -832,6 +850,7 @@ export default function App() {
           fetchHistory();
           fetchPredictorBalance();
           fetchActiveTournament();
+          fetchPolicyStats();
           if (userWallet) fetchSpectatorBalance(userWallet);
           setIsFighting(false);
           return;
@@ -2220,6 +2239,161 @@ export default function App() {
           </div>
 
         </div>
+
+        {/* ── POLICY ENGINE DASHBOARD ─────────────────────────────────────── */}
+        <div style={{ display: 'flex', gap: '1rem', marginTop: '1.5rem', flexWrap: 'wrap' }}>
+
+          {/* Stats Counter Panel */}
+          <div className="panel" style={{ flex: '0 0 340px' }}>
+            <h2 className="panel-title" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <span style={{ fontSize: '1.1rem' }}>🛡️</span> BATTLE POLICY ENGINE
+            </h2>
+            <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: '1rem', fontFamily: 'monospace' }}>
+              Every wager request evaluated against 8 policy rules.<br/>
+              Each decision SHA-256 attested. Not theater.
+            </div>
+
+            {policyStats ? (
+              <>
+                {/* Big counters — mirrors Shadow's COPIED/BLOCKED display */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem' }}>
+                  <div style={{
+                    background: 'linear-gradient(135deg, rgba(0,255,136,0.08), rgba(0,255,136,0.02))',
+                    border: '1px solid rgba(0,255,136,0.3)',
+                    borderRadius: '8px', padding: '1rem', textAlign: 'center'
+                  }}>
+                    <div style={{ fontSize: '2rem', fontWeight: 900, color: '#00ff88', lineHeight: 1 }}>
+                      {policyStats.approved}
+                    </div>
+                    <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.3rem', letterSpacing: '0.1em' }}>
+                      APPROVED
+                    </div>
+                  </div>
+                  <div style={{
+                    background: 'linear-gradient(135deg, rgba(255,59,59,0.08), rgba(255,59,59,0.02))',
+                    border: '1px solid rgba(255,59,59,0.3)',
+                    borderRadius: '8px', padding: '1rem', textAlign: 'center'
+                  }}>
+                    <div style={{ fontSize: '2rem', fontWeight: 900, color: '#ff3b3b', lineHeight: 1 }}>
+                      {policyStats.blocked}
+                    </div>
+                    <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.3rem', letterSpacing: '0.1em' }}>
+                      BLOCKED
+                    </div>
+                  </div>
+                </div>
+
+                {/* Approval rate bar */}
+                <div style={{ marginBottom: '1rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', marginBottom: '0.3rem' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>Policy Pass Rate</span>
+                    <span style={{ color: 'var(--cyan)', fontWeight: 'bold' }}>{policyStats.approvalRate}</span>
+                  </div>
+                  <div style={{ height: '6px', background: 'rgba(255,255,255,0.1)', borderRadius: '3px', overflow: 'hidden' }}>
+                    <div style={{
+                      height: '100%',
+                      width: policyStats.approvalRate,
+                      background: 'linear-gradient(90deg, #00ff88, #00d4ff)',
+                      borderRadius: '3px',
+                      transition: 'width 0.5s ease'
+                    }} />
+                  </div>
+                </div>
+
+                {/* Blocked by rule breakdown */}
+                {Object.keys(policyStats.blockedByRule || {}).length > 0 && (
+                  <div>
+                    <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: '0.5rem', letterSpacing: '0.08em' }}>
+                      BLOCKED BY RULE
+                    </div>
+                    {Object.entries(policyStats.blockedByRule).map(([rule, count]) => {
+                      const ruleInfo = (policyStats.rules || []).find(r => r.code === rule);
+                      return (
+                        <div key={rule} style={{
+                          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                          padding: '0.3rem 0.5rem', marginBottom: '0.25rem',
+                          background: 'rgba(255,59,59,0.05)', borderRadius: '4px',
+                          border: '1px solid rgba(255,59,59,0.15)'
+                        }}>
+                          <span style={{ fontSize: '0.68rem', color: 'var(--text-secondary)' }}>
+                            <span style={{ color: '#ff3b3b', fontFamily: 'monospace', marginRight: '0.4rem' }}>{rule}</span>
+                            {ruleInfo?.name || rule}
+                          </span>
+                          <span style={{ fontSize: '0.75rem', fontWeight: 'bold', color: '#ff3b3b' }}>{count}×</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', textAlign: 'center', padding: '1rem 0' }}>
+                No policy decisions recorded yet.<br/>
+                <span style={{ fontSize: '0.7rem' }}>Start a battle to trigger the engine.</span>
+              </div>
+            )}
+
+            <button
+              onClick={fetchPolicyStats}
+              style={{
+                marginTop: '0.75rem', width: '100%', padding: '0.5rem',
+                background: 'rgba(0,212,255,0.1)', border: '1px solid rgba(0,212,255,0.3)',
+                borderRadius: '6px', color: 'var(--cyan)', fontSize: '0.72rem',
+                cursor: 'pointer', letterSpacing: '0.08em'
+              }}
+            >
+              ↺ REFRESH POLICY STATS
+            </button>
+          </div>
+
+          {/* Policy Audit Log Panel */}
+          <div className="panel" style={{ flex: 1, minWidth: '300px' }}>
+            <h2 className="panel-title">
+              📋 POLICY AUDIT LOG <span style={{ fontWeight: 400, fontSize: '0.7rem', color: 'var(--text-muted)' }}>— SHA-256 attested decisions</span>
+            </h2>
+            <div className="gladiator-list" style={{ maxHeight: '320px', fontFamily: 'monospace' }}>
+              {policyLog.length === 0 ? (
+                <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.8rem', padding: '1rem 0' }}>
+                  Policy log is empty — no battles triggered yet.
+                </div>
+              ) : policyLog.slice(0, 20).map((entry, i) => (
+                <div key={i} style={{
+                  padding: '0.5rem 0.6rem', marginBottom: '0.35rem',
+                  background: entry.approved
+                    ? 'linear-gradient(90deg, rgba(0,255,136,0.04), transparent)'
+                    : 'linear-gradient(90deg, rgba(255,59,59,0.06), transparent)',
+                  border: `1px solid ${entry.approved ? 'rgba(0,255,136,0.2)' : 'rgba(255,59,59,0.2)'}`,
+                  borderRadius: '5px',
+                  fontSize: '0.67rem',
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.2rem' }}>
+                    <span style={{
+                      fontWeight: 'bold',
+                      color: entry.approved ? '#00ff88' : '#ff3b3b',
+                      letterSpacing: '0.05em'
+                    }}>
+                      {entry.approved ? '✅ APPROVED' : `❌ BLOCKED [${entry.ruleCode}]`}
+                    </span>
+                    <span style={{ color: 'var(--text-muted)', fontSize: '0.62rem' }}>
+                      {new Date(entry.timestamp).toLocaleTimeString()}
+                    </span>
+                  </div>
+                  <div style={{ color: 'var(--text-secondary)', marginBottom: '0.15rem' }}>
+                    {entry.gladiatorAName} vs {entry.gladiatorBName}
+                  </div>
+                  <div style={{ color: entry.approved ? 'rgba(0,255,136,0.6)' : 'rgba(255,59,59,0.7)', fontSize: '0.63rem' }}>
+                    {entry.reason}
+                  </div>
+                  <div style={{ color: 'rgba(255,255,255,0.2)', fontSize: '0.6rem', marginTop: '0.2rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    sha256: {entry.sha256}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+        </div>
+        {/* ── END POLICY ENGINE DASHBOARD ─────────────────────────────────── */}
 
       </main>
     </div>

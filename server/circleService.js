@@ -16,13 +16,15 @@ const DB_FILE = process.env.VERCEL === '1'
 // Initialize database
 function readDb() {
   if (!fs.existsSync(DB_FILE)) {
-    fs.writeFileSync(DB_FILE, JSON.stringify({ gladiators: [], battles: [], ledger: {}, ledgerEURC: {}, activeBets: [], tournaments: [] }, null, 2));
+    fs.writeFileSync(DB_FILE, JSON.stringify({ gladiators: [], battles: [], ledger: {}, ledgerEURC: {}, activeBets: [], tournaments: [], policyLog: [] }, null, 2));
   }
   try {
     const data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
     if (!data.ledgerEURC) data.ledgerEURC = {};
     if (!data.activeBets) data.activeBets = [];
     if (!data.tournaments) data.tournaments = [];
+    if (!data.policyLog) data.policyLog = [];
+
     
     // Ensure all existing gladiators have properties initialized
     let changed = false;
