@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "buildCommand": "npm install --prefix client && npm run build --prefix client",
+  "outputDirectory": "client/dist",
+  "installCommand": "npm install --prefix server && npm install --prefix client",
+  "functions": {
+    "api/index.js": {
+      "runtime": "nodejs20.x",
+      "maxDuration": 30
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/index.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/client/dist/$1"
+    }
+  ]
+}

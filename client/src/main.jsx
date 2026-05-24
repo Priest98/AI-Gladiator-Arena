@@ -3,8 +3,10 @@ import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
 import './index.css';
 
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8081/api';
+
 window.addEventListener('error', (event) => {
-  fetch('http://localhost:8081/api/client-error', {
+  fetch(`${API_BASE}/client-error`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -15,7 +17,7 @@ window.addEventListener('error', (event) => {
 });
 
 window.addEventListener('unhandledrejection', (event) => {
-  fetch('http://localhost:8081/api/client-error', {
+  fetch(`${API_BASE}/client-error`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

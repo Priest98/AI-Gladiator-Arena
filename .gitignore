@@ -7,9 +7,13 @@ client/dist/
 # Local database file
 server/database.json
 
-# Environment configuration files
+# Environment configuration files (secrets)
 .env
 .env.local
-.env.production
 .env*.local
+server/.env
+server/.env.local
 *.log
+
+# Allow client production env (contains only public VITE_ vars, no secrets)
+!client/.env.production

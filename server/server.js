@@ -23,7 +23,8 @@ const allowedOrigins = [
   'http://127.0.0.1:8080',
   'http://127.0.0.1:8081',
   'http://127.0.0.1:3000',
-  'https://agora.thecanteenapp.com'
+  'https://agora.thecanteenapp.com',
+  'https://ai-gladiator-arena.vercel.app'
 ];
 
 app.use(cors({
@@ -32,7 +33,8 @@ app.use(cors({
       return callback(null, true);
     }
     const isLocalhost = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
-    if (isLocalhost || allowedOrigins.includes(origin)) {
+    const isVercel = /^https:\/\/ai-gladiator-arena(-[a-z0-9]+)?\.vercel\.app$/.test(origin);
+    if (isLocalhost || isVercel || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
       callback(new Error('Blocked by CORS security policy'));
@@ -1444,6 +1446,12 @@ app.post('/api/client-error', (req, res) => {
   res.json({ success: true });
 });
 
-app.listen(PORT, () => {
-  console.log(`[ArcadeServer] Server running on http://localhost:${PORT}`);
-});
+// Export app for Vercel serverless functions
+export default app;
+
+// Only listen when running directly (not in serverless environment)
+if (process.env.NODE_ENV !== 'production' || process.env.VERCEL !== '1') {
+  app.listen(PORT, () => {
+    console.log(`[ArcadeServer] Server running on http://localhost:${PORT}`);
+  });
+}

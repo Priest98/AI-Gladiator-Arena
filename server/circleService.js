@@ -8,7 +8,10 @@ dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DB_FILE = path.join(__dirname, 'database.json');
+// On Vercel (serverless), only /tmp is writable. Use it in production.
+const DB_FILE = process.env.VERCEL === '1'
+  ? '/tmp/database.json'
+  : path.join(__dirname, 'database.json');
 
 // Initialize database
 function readDb() {
