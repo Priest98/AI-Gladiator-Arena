@@ -1,0 +1,12 @@
+{
+  "name": "arcade-agent-monorepo",
+  "version": "1.0.0",
+  "description": "USDC-backed AI Gladiator game on Arc L1",
+  "private": true,
+  "scripts": {
+    "install:all": "npm install --prefix server && npm install --prefix client",
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "dev": "node -e \"const { spawn } = require('child_process'); spawn('npm', ['run', 'dev:server'], { stdio: 'inherit', shell: true }); spawn('npm', ['run', 'dev:client'], { stdio: 'inherit', shell: true });\""
+  }
+}
