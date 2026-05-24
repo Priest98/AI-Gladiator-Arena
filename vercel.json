@@ -5,7 +5,6 @@
   "installCommand": "npm install --prefix server && npm install --prefix client",
   "functions": {
     "api/index.js": {
-      "runtime": "nodejs20.x",
       "maxDuration": 30
     }
   },
@@ -15,8 +14,11 @@
       "dest": "/api/index.js"
     },
     {
+      "handle": "filesystem"
+    },
+    {
       "src": "/(.*)",
-      "dest": "/client/dist/$1"
+      "dest": "/index.html"
     }
   ]
 }
