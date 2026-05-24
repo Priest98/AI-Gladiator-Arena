@@ -3,6 +3,18 @@ import ArenaVisualizer from './ArenaVisualizer';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8081/api';
 
+// Safe JSON fetch — never throws on non-JSON responses (e.g. Vercel HTML error pages)
+async function apiFetch(url, options = {}) {
+  const res = await fetch(url, options);
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    const text = await res.text();
+    throw new Error(`Server returned non-JSON response (HTTP ${res.status}): ${text.slice(0, 120)}`);
+  }
+  const data = await res.json();
+  return { ok: res.ok, status: res.status, data };
+}
+
 export default function App() {
   const [gladiators, setGladiators] = useState([]);
   const [battleHistory, setBattleHistory] = useState([]);
@@ -110,12 +122,12 @@ export default function App() {
 
   const fetchPolicyStats = async () => {
     try {
-      const [statsRes, logRes] = await Promise.all([
-        fetch(`${API_BASE}/policy/stats`),
-        fetch(`${API_BASE}/policy/log`),
+      const [statsResult, logResult] = await Promise.all([
+        apiFetch(`${API_BASE}/policy/stats`).catch(() => null),
+        apiFetch(`${API_BASE}/policy/log`).catch(() => null),
       ]);
-      if (statsRes.ok) setPolicyStats(await statsRes.json());
-      if (logRes.ok) setPolicyLog(await logRes.json());
+      if (statsResult?.ok) setPolicyStats(statsResult.data);
+      if (logResult?.ok) setPolicyLog(logResult.data);
     } catch (e) { /* silent */ }
   };
 
@@ -237,30 +249,28 @@ export default function App() {
 
   const fetchGladiators = async () => {
     try {
-      const res = await fetch(`${API_BASE}/gladiators`);
-      const data = await res.json();
-      if (Array.isArray(data)) {
+      const { ok, data } = await apiFetch(`${API_BASE}/gladiators`);
+      if (ok && Array.isArray(data)) {
         setGladiators(data);
       } else {
         setGladiators([]);
       }
     } catch (err) {
-      console.error('Error fetching gladiators:', err);
+      console.error('Error fetching gladiators:', err.message);
       setGladiators([]);
     }
   };
 
   const fetchHistory = async () => {
     try {
-      const res = await fetch(`${API_BASE}/battles`);
-      const data = await res.json();
-      if (Array.isArray(data)) {
+      const { ok, data } = await apiFetch(`${API_BASE}/battles`);
+      if (ok && Array.isArray(data)) {
         setBattleHistory(data);
       } else {
         setBattleHistory([]);
       }
     } catch (err) {
-      console.error('Error fetching history:', err);
+      console.error('Error fetching history:', err.message);
       setBattleHistory([]);
     }
   };
@@ -271,8 +281,19 @@ export default function App() {
       return;
     }
     try {
-      const configRes = await fetch(`${API_BASE}/config`);
-      const configData = await configRes.json();
+      // Fetch Arc network config — fall back to defaults if API unreachable
+      let configData = {
+        rpcUrl: 'https://rpc.testnet.arc-node.thecanteenapp.com/v1/public',
+        chainId: '0x4ce946',
+        chainName: 'Arc Testnet',
+        blockExplorerUrl: 'https://testnet.arcscan.app'
+      };
+      try {
+        const { ok, data } = await apiFetch(`${API_BASE}/config`);
+        if (ok && data.rpcUrl) configData = { ...configData, ...data };
+      } catch (cfgErr) {
+        console.warn('[Wallet] Could not fetch config from API, using defaults:', cfgErr.message);
+      }
       const targetRpcUrl = configData.rpcUrl;
       const arcChainIdHex = configData.chainId || '0x4ce946';
 
@@ -747,18 +768,33 @@ export default function App() {
         battleData = tournamentData.battleRecord;
       } else {
         const endpoint = isSandbox ? '/battles/sandbox' : '/battles';
-        const res = await fetch(`${API_BASE}${endpoint}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            gladiatorAId: selectedGladA.id,
-            gladiatorBId: selectedGladB.id
-          })
-        });
-        battleData = await res.json();
-
-        if (!res.ok) {
-          setConsoleLogs(prev => [...prev, `[FAIL] Battle setup failed: ${battleData.error}`]);
+        try {
+          const { ok, data, status } = await apiFetch(`${API_BASE}${endpoint}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              gladiatorAId: selectedGladA.id,
+              gladiatorBId: selectedGladB.id
+            })
+          });
+          battleData = data;
+          if (!ok) {
+            // Check if blocked by policy engine
+            if (status === 403 && data.policy) {
+              setConsoleLogs(prev => [...prev,
+                `[PolicyEngine] ❌ BATTLE BLOCKED`,
+                `[Rule ${data.policy.ruleCode}] ${data.policy.reason}`,
+                `[SHA-256] ${data.policy.sha256}`,
+              ]);
+              fetchPolicyStats();
+            } else {
+              setConsoleLogs(prev => [...prev, `[FAIL] Battle setup failed: ${data.error || 'Unknown error'}`]);
+            }
+            setIsFighting(false);
+            return;
+          }
+        } catch (fetchErr) {
+          setConsoleLogs(prev => [...prev, `[FAIL] Could not reach server: ${fetchErr.message}`]);
           setIsFighting(false);
           return;
         }
