@@ -1,11 +1,108 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Wallet } from 'ethers';
 import ArenaVisualizer from './ArenaVisualizer';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8081/api';
 
-// Safe JSON fetch — never throws on non-JSON responses (e.g. Vercel HTML error pages)
+// Safe JSON fetch with x402 Micropayment Auto-Gate Interceptor
 async function apiFetch(url, options = {}) {
-  const res = await fetch(url, options);
+  let res = await fetch(url, options);
+  
+  if (res.status === 402) {
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      try {
+        const errData = await res.clone().json();
+        if (errData.fee && errData.recipient) {
+          console.log(`[x402] Micropayment required: ${errData.fee} USDC. Processing client auto-settlement...`);
+          
+          const storedSession = localStorage.getItem('arcade_session_key');
+          let payHeaders = { 'Content-Type': 'application/json' };
+          let ownerAddress = null;
+          
+          if (storedSession) {
+            try {
+              const session = JSON.parse(storedSession);
+              if (session.expiry > Date.now()) {
+                ownerAddress = session.ownerAddress;
+                // Sign using local ephemeral key
+                const wallet = new Wallet(session.privateKey);
+                const timestamp = Date.now();
+                const message = `Authorize micropayment of ${errData.fee} ${errData.token || 'USDC'} for x402 payment at timestamp ${timestamp}`;
+                const signature = await wallet.signMessage(message);
+                
+                payHeaders = {
+                  ...payHeaders,
+                  'x-signature': signature,
+                  'x-message': message,
+                  'x-owner-address': session.ownerAddress,
+                  'x-session-agent': session.agentAddress,
+                  'x-session-limit': session.limit,
+                  'x-session-expiry': String(session.expiry),
+                  'x-session-auth-sig': session.authSig
+                };
+              }
+            } catch (e) {
+              console.warn("Failed to sign micropayment with session key:", e);
+            }
+          }
+          
+          // Fallback to MetaMask if no session key is active
+          if (!ownerAddress && window.ethereum?.selectedAddress) {
+            ownerAddress = window.ethereum.selectedAddress;
+            const timestamp = Date.now();
+            const message = `Authorize micropayment of ${errData.fee} ${errData.token || 'USDC'} for x402 payment at timestamp ${timestamp}`;
+            const signature = await window.ethereum.request({
+              method: 'personal_sign',
+              params: [message, ownerAddress]
+            });
+            
+            payHeaders = {
+              ...payHeaders,
+              'x-signature': signature,
+              'x-message': message,
+              'x-owner-address': ownerAddress
+            };
+          }
+          
+          if (ownerAddress) {
+            const payRes = await fetch(`${API_BASE}/user/micropayment`, {
+              method: 'POST',
+              headers: payHeaders,
+              body: JSON.stringify({
+                amount: parseFloat(errData.fee),
+                token: errData.token || 'USDC'
+              })
+            });
+            
+            if (payRes.ok) {
+              const payData = await payRes.json();
+              console.log(`[x402] Settled fee. Hash: ${payData.txHash}. Retrying gated resource request...`);
+              
+              // Retry with payment proof header
+              const retryHeaders = {
+                ...options.headers,
+                'x-payment-proof': payData.txHash
+              };
+              res = await fetch(url, {
+                ...options,
+                headers: retryHeaders
+              });
+            } else {
+              const payErrData = await payRes.json();
+              throw new Error(`Micropayment settlement failed: ${payErrData.error}`);
+            }
+          } else {
+            throw new Error("No connected wallet or active session key to perform micropayment.");
+          }
+        }
+      } catch (payErr) {
+        console.warn("[x402] Micropayment auto-gate failure:", payErr.message);
+        alert(`[x402 Payment Failed]: ${payErr.message}`);
+      }
+    }
+  }
+
   const contentType = res.headers.get('content-type') || '';
   if (!contentType.includes('application/json')) {
     const text = await res.text();
@@ -97,6 +194,12 @@ export default function App() {
   const [policyStats, setPolicyStats] = useState(null);
   const [policyLog, setPolicyLog] = useState([]);
 
+  // Session Key State
+  const [sessionKey, setSessionKey] = useState(null);
+  const [sessionKeyLimit, setSessionKeyLimit] = useState('50');
+  const [sessionKeyDuration, setSessionKeyDuration] = useState('60');
+  const [isAuthorizingSession, setIsAuthorizingSession] = useState(false);
+
   // Initialize
   useEffect(() => {
     fetchGladiators();
@@ -166,6 +269,177 @@ export default function App() {
       if (logResult?.ok) setPolicyLog(logResult.data);
     } catch (e) { /* silent */ }
   };
+
+  // Load Session Key on wallet change or mount
+  useEffect(() => {
+    const stored = localStorage.getItem('arcade_session_key');
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        if (parsed.expiry > Date.now() && userWallet && parsed.ownerAddress.toLowerCase() === userWallet.toLowerCase()) {
+          setSessionKey(parsed);
+        } else {
+          localStorage.removeItem('arcade_session_key');
+          setSessionKey(null);
+        }
+      } catch (e) {
+        localStorage.removeItem('arcade_session_key');
+        setSessionKey(null);
+      }
+    } else {
+      setSessionKey(null);
+    }
+  }, [userWallet]);
+
+  const getAuthHeaders = async (message) => {
+    if (sessionKey && sessionKey.expiry > Date.now() && userWallet && sessionKey.ownerAddress.toLowerCase() === userWallet.toLowerCase()) {
+      try {
+        const wallet = new Wallet(sessionKey.privateKey);
+        const signature = await wallet.signMessage(message);
+        return {
+          'Content-Type': 'application/json',
+          'x-signature': signature,
+          'x-message': message,
+          'x-owner-address': sessionKey.ownerAddress,
+          'x-session-agent': sessionKey.agentAddress,
+          'x-session-limit': sessionKey.limit,
+          'x-session-expiry': String(sessionKey.expiry),
+          'x-session-auth-sig': sessionKey.authSig
+        };
+      } catch (e) {
+        console.warn("Failed to sign with session key, falling back to MetaMask:", e);
+      }
+    }
+
+    if (!userWallet) {
+      throw new Error("Wallet not connected");
+    }
+    
+    const signature = await window.ethereum.request({
+      method: 'personal_sign',
+      params: [message, userWallet]
+    });
+
+    return {
+      'Content-Type': 'application/json',
+      'x-signature': signature,
+      'x-message': message,
+      'x-owner-address': userWallet
+    };
+  };
+
+  const handleAuthorizeSessionKey = async () => {
+    if (!userWallet || isAuthorizingSession) return;
+    setIsAuthorizingSession(true);
+    try {
+      const randomWallet = Wallet.createRandom();
+      const agentAddress = randomWallet.address;
+      const privateKey = randomWallet.privateKey;
+      
+      const durationMin = parseFloat(sessionKeyDuration) || 60;
+      const expiry = Date.now() + Math.floor(durationMin * 60 * 1000);
+      const limitStr = parseFloat(sessionKeyLimit).toFixed(2);
+      
+      const domain = {
+        name: "AI-Gladiator-Arena-Session-Manager",
+        version: "1.0.0",
+        chainId: 5040454, // Arc Testnet
+        verifyingContract: "0x0000000000000000000000000000000000000000"
+      };
+
+      const types = {
+        SessionAuthorization: [
+          { name: "agentAddress", type: "address" },
+          { name: "ownerAddress", type: "address" },
+          { name: "spendingLimit", type: "string" },
+          { name: "expiry", type: "uint256" }
+        ]
+      };
+
+      const value = {
+        agentAddress: agentAddress,
+        ownerAddress: userWallet,
+        spendingLimit: limitStr,
+        expiry: expiry
+      };
+
+      const msgParams = JSON.stringify({
+        domain,
+        types: {
+          EIP712Domain: [
+            { name: "name", type: "string" },
+            { name: "version", type: "string" },
+            { name: "chainId", type: "uint256" },
+            { name: "verifyingContract", type: "address" }
+          ],
+          SessionAuthorization: types.SessionAuthorization
+        },
+        primaryType: "SessionAuthorization",
+        message: value
+      });
+
+      const authSig = await window.ethereum.request({
+        method: 'eth_signTypedData_v4',
+        params: [userWallet, msgParams]
+      });
+
+      const newSession = {
+        agentAddress,
+        privateKey,
+        limit: limitStr,
+        expiry,
+        authSig,
+        ownerAddress: userWallet
+      };
+
+      localStorage.setItem('arcade_session_key', JSON.stringify(newSession));
+      setSessionKey(newSession);
+      alert(`⚡ Ephemeral Session Key Authorized successfully!\nAgent: ${agentAddress}\nLimit: ${limitStr} USDC\nDuration: ${durationMin} minutes.\n\nTransactions will now be auto-signed!`);
+    } catch (err) {
+      alert(`Session Authorization Failed: ${err.message}`);
+    } finally {
+      setIsAuthorizingSession(false);
+    }
+  };
+
+  const handleRevokeSessionKey = () => {
+    localStorage.removeItem('arcade_session_key');
+    setSessionKey(null);
+    alert("Session key revoked. All future actions will require MetaMask approval again.");
+  };
+
+  // Global Error and Promise Rejection Telemetry Boundary for Mobile Debugging
+  useEffect(() => {
+    const handleError = (message, source, lineno, colno, error) => {
+      const errorStr = `Error: ${message} at ${source}:${lineno}:${colno}`;
+      console.error(errorStr);
+      fetch(`${API_BASE}/client-error`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: errorStr, stack: error?.stack || '' })
+      }).catch(() => {});
+      alert(`[Client Runtime Error]: ${message}\n\nFile: ${source}:${lineno}`);
+    };
+
+    const handleRejection = (event) => {
+      const errorStr = `Unhandled Rejection: ${event.reason}`;
+      console.error(errorStr);
+      fetch(`${API_BASE}/client-error`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: errorStr, stack: event.reason?.stack || '' })
+      }).catch(() => {});
+      alert(`[Unhandled Rejection]: ${event.reason}`);
+    };
+
+    window.addEventListener('error', handleError);
+    window.addEventListener('unhandledrejection', handleRejection);
+
+    return () => {
+      window.removeEventListener('error', handleError);
+      window.removeEventListener('unhandledrejection', handleRejection);
+    };
+  }, []);
 
 
 
@@ -397,7 +671,7 @@ export default function App() {
         }]
       });
       
-      await fetch(`${API_BASE}/faucet`, {
+      await apiFetch(`${API_BASE}/faucet`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -481,22 +755,13 @@ export default function App() {
     try {
       const gladiatorId = betTarget === 'A' ? predictionData.gladiatorAId : predictionData.gladiatorBId;
       
-      // Request MetaMask signature before placing bet
       const timestamp = Date.now();
       const message = `Place bet of ${amountNum} ${betToken} on Gladiator ${gladiatorId} at timestamp ${timestamp}`;
-      const signature = await window.ethereum.request({
-        method: 'personal_sign',
-        params: [message, userWallet]
-      });
+      const authHeaders = await getAuthHeaders(message);
 
       const { ok, data } = await apiFetch(`${API_BASE}/bets`, {
          method: 'POST',
-         headers: { 
-           'Content-Type': 'application/json',
-           'x-signature': signature,
-           'x-message': message,
-           'x-owner-address': userWallet
-         },
+         headers: authHeaders,
          body: JSON.stringify({
            gladiatorId,
            amount: amountNum,
@@ -531,9 +796,13 @@ export default function App() {
     ]);
     
     try {
+      const timestamp = Date.now();
+      const message = `Authorize AI upgrade evaluation for Gladiator ${gladiatorId} at timestamp ${timestamp}`;
+      const authHeaders = await getAuthHeaders(message);
+
       const { ok, data } = await apiFetch(`${API_BASE}/gladiators/${gladiatorId}/evaluate-upgrade`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: authHeaders
       });
       if (ok) {
         if (data.upgraded) {
@@ -601,6 +870,7 @@ export default function App() {
       }
     } catch (err) {
       console.error('Error creating gladiator:', err);
+      alert(`Gladiator Activation Failed: ${err.message}`);
     } finally {
       setIsCreating(false);
     }
@@ -608,16 +878,17 @@ export default function App() {
 
   const handleFaucet = async (address) => {
     try {
-      const res = await fetch(`${API_BASE}/faucet`, {
+      const { ok } = await apiFetch(`${API_BASE}/faucet`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ address })
       });
-      if (res.ok) {
+      if (ok) {
         await fetchGladiators();
       }
     } catch (err) {
-      console.error('Faucet request failed:', err);
+      console.error('Faucet request failed:', err.message);
+      alert(`Faucet request failed: ${err.message}`);
     }
   };
 
@@ -1209,36 +1480,27 @@ export default function App() {
     try {
       const timestamp = Date.now();
       const message = `Place tournament champion bet of ${amountNum} USDC on Gladiator ${tourBetTarget} at timestamp ${timestamp}`;
-      const signature = await window.ethereum.request({
-        method: 'personal_sign',
-        params: [message, userWallet]
-      });
+      const authHeaders = await getAuthHeaders(message);
 
-      const res = await fetch(`${API_BASE}/tournaments/${activeTournament.id}/bet`, {
+      const { ok, data } = await apiFetch(`${API_BASE}/tournaments/${activeTournament.id}/bet`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-signature': signature,
-          'x-message': message,
-          'x-owner-address': userWallet
-        },
+        headers: authHeaders,
         body: JSON.stringify({
           gladiatorId: tourBetTarget,
           amount: amountNum,
           token: 'USDC'
         })
       });
-      const data = await res.json();
-      if (res.ok) {
+      if (ok) {
         alert("Tournament wager recorded!");
         setTourBetAmount('');
         setActiveTournament(data.tournament);
         fetchSpectatorBalance(userWallet);
       } else {
-        alert(`Tournament bet failed: ${data.error}`);
+        alert(`Tournament bet failed: ${data?.error || 'Server error'}`);
       }
     } catch (err) {
-      alert(`Wager failed: ${err.message}`);
+      alert(`Tournament Betting Failed: ${err.message}`);
     } finally {
       setIsPlacingTourBet(false);
     }
@@ -2151,6 +2413,106 @@ export default function App() {
 
         {/* Right Column: Leaderboards, Faucet and History */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+
+          {/* Ephemeral Session Key Panel */}
+          <div className="panel" style={{ border: '1px solid rgba(212,255,62,0.3)', background: 'linear-gradient(135deg, #090a10 0%, #12140a 100%)' }}>
+            <h2 className="panel-title" style={{ color: 'var(--yellow)' }}>
+              ⚡ SESSION DELEGATION
+              {sessionKey ? (
+                <span style={{ fontSize: '0.6rem', color: '#00ff88', marginLeft: '0.5rem', fontWeight: 'normal' }}>● ACTIVE</span>
+              ) : (
+                <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)', marginLeft: '0.5rem', fontWeight: 'normal' }}>● INACTIVE</span>
+              )}
+            </h2>
+
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginBottom: '0.8rem', lineHeight: 1.5 }}>
+              Delegate wagers & upgrades to an ephemeral key to bypass MetaMask transaction prompts during gameplay.
+            </div>
+
+            {!userWallet ? (
+              <div style={{ textAlign: 'center', padding: '1rem 0', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                🔌 Connect your wallet to delegate session keys.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                {sessionKey ? (
+                  <div style={{ background: 'rgba(0,0,0,0.4)', padding: '0.6rem', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.65rem', fontFamily: 'monospace', color: 'var(--text-secondary)', marginBottom: '0.2rem' }}>
+                      <span>Agent Key:</span>
+                      <span style={{ color: 'var(--yellow)' }}>{sessionKey.agentAddress.slice(0, 10)}...{sessionKey.agentAddress.slice(-6)}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.65rem', fontFamily: 'monospace', color: 'var(--text-secondary)', marginBottom: '0.2rem' }}>
+                      <span>Limit Budget:</span>
+                      <span style={{ color: 'var(--cyan)' }}>{sessionKey.limit} USDC</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.65rem', fontFamily: 'monospace', color: 'var(--text-secondary)' }}>
+                      <span>Expires:</span>
+                      <span style={{ color: '#ff9f43' }}>
+                        {new Date(sessionKey.expiry).toLocaleTimeString()} ({Math.max(0, Math.round((sessionKey.expiry - Date.now()) / 60000))}m left)
+                      </span>
+                    </div>
+
+                    <button
+                      className="btn btn-secondary btn-small"
+                      style={{ marginTop: '0.6rem', width: '100%', padding: '0.4rem', borderColor: '#ff5252', color: '#ff5252' }}
+                      onClick={handleRevokeSessionKey}
+                    >
+                      🛑 REVOKE SESSION DELEGATION
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                      <div>
+                        <label className="form-label" style={{ fontSize: '0.6rem' }}>Session Budget (USDC)</label>
+                        <select
+                          className="form-select"
+                          style={{ padding: '0.4rem', fontSize: '0.68rem', height: 'auto' }}
+                          value={sessionKeyLimit}
+                          onChange={e => setSessionKeyLimit(e.target.value)}
+                          disabled={isAuthorizingSession}
+                        >
+                          <option value="10">10.00 USDC</option>
+                          <option value="25">25.00 USDC</option>
+                          <option value="50">50.00 USDC</option>
+                          <option value="100">100.00 USDC</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="form-label" style={{ fontSize: '0.6rem' }}>Duration</label>
+                        <select
+                          className="form-select"
+                          style={{ padding: '0.4rem', fontSize: '0.68rem', height: 'auto' }}
+                          value={sessionKeyDuration}
+                          onChange={e => setSessionKeyDuration(e.target.value)}
+                          disabled={isAuthorizingSession}
+                        >
+                          <option value="15">15 Minutes</option>
+                          <option value="30">30 Minutes</option>
+                          <option value="60">1 Hour</option>
+                          <option value="180">3 Hours</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <button
+                      className="btn btn-primary"
+                      style={{
+                        padding: '0.5rem',
+                        fontSize: '0.7rem',
+                        background: 'linear-gradient(135deg, #d4ff3e, #8cff3e)',
+                        color: '#000'
+                      }}
+                      onClick={handleAuthorizeSessionKey}
+                      disabled={isAuthorizingSession}
+                    >
+                      {isAuthorizingSession ? 'AUTHORIZING IN METAMASK...' : '⚡ AUTHORIZE EPHEMERAL SESSION KEY'}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           {/* Arc Faucet Panel */}
           <div className="panel" style={{ border: '1px solid rgba(0,200,255,0.3)', background: 'linear-gradient(135deg, #090a10 0%, #0a0f1a 100%)' }}>

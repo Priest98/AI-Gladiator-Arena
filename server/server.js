@@ -14,6 +14,9 @@ const FAUCET_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
 // Policy Engine: track gladiators currently in active battles (anti-double-book)
 const activeBattleGladiators = new Set();
 
+// x402 Payment Gate: track spent payment hashes (replay protection)
+const processedPayments = new Set();
+
 
 dotenv.config();
 
@@ -55,22 +58,112 @@ function sendSanitizedError(res, err, defaultMsg = "An internal server error occ
   res.status(500).json({ error: defaultMsg });
 }
 
-// Signature Verification Middleware for withdrawal/owner checks
+// Signature Verification Middleware for withdrawal/owner checks (supports EIP-712 Session Key delegation)
 function verifyOwnerSignature(req, res, next) {
   const signature = req.headers['x-signature'];
   const message = req.headers['x-message'];
   const ownerAddress = req.headers['x-owner-address'];
+  
+  // Session key delegation headers
+  const sessionAgent = req.headers['x-session-agent'];
+  const sessionLimit = req.headers['x-session-limit'];
+  const sessionExpiry = req.headers['x-session-expiry'];
+  const sessionAuthSig = req.headers['x-session-auth-sig'];
 
   if (!signature || !message || !ownerAddress) {
     return res.status(401).json({ error: "Missing signature headers: x-signature, x-message, x-owner-address" });
   }
 
   try {
-    const recoveredAddress = ethers.verifyMessage(message, signature);
-    if (recoveredAddress.toLowerCase() !== ownerAddress.toLowerCase()) {
-      return res.status(401).json({ error: "Signature verification failed: unauthorized wallet." });
+    const recoveredSigner = ethers.verifyMessage(message, signature);
+
+    if (sessionAgent) {
+      // 1. Recovered signer of the message must match the session key agent
+      if (recoveredSigner.toLowerCase() !== sessionAgent.toLowerCase()) {
+        return res.status(401).json({ error: "Signature does not match session agent." });
+      }
+
+      // 2. Verify expiry
+      const expiry = parseInt(sessionExpiry);
+      if (isNaN(expiry) || Date.now() > expiry) {
+        return res.status(401).json({ error: "Session key has expired." });
+      }
+
+      // 3. Block session keys on critical administrative or direct financial operations
+      const path = req.path.toLowerCase();
+      if (path.includes('withdraw') || path.includes('unstake') || req.method === 'DELETE' || path.includes('sponsor')) {
+        return res.status(403).json({ error: "Session keys are not authorized for critical operations like withdrawals, unstaking, retirement, or sponsorships." });
+      }
+
+      // 4. Reconstruct EIP-712 SessionAuthorization to verify owner's delegation to agent
+      const domain = {
+        name: "AI-Gladiator-Arena-Session-Manager",
+        version: "1.0.0",
+        chainId: 5040454, // Arc Testnet
+        verifyingContract: "0x0000000000000000000000000000000000000000"
+      };
+
+      const types = {
+        SessionAuthorization: [
+          { name: "agentAddress", type: "address" },
+          { name: "ownerAddress", type: "address" },
+          { name: "spendingLimit", type: "string" },
+          { name: "expiry", type: "uint256" }
+        ]
+      };
+
+      const value = {
+        agentAddress: sessionAgent,
+        ownerAddress: ownerAddress,
+        spendingLimit: sessionLimit,
+        expiry: expiry
+      };
+
+      const recoveredOwner = ethers.verifyTypedData(domain, types, value, sessionAuthSig);
+      if (recoveredOwner.toLowerCase() !== ownerAddress.toLowerCase()) {
+        return res.status(401).json({ error: "Session key authorization signature invalid." });
+      }
+
+      // 5. Track and enforce cumulative spending limits in db
+      let transactionCost = 0.0;
+      if (path.includes('bets') || path.includes('bet')) {
+        transactionCost = parseFloat(req.body.amount) || 0.0;
+      } else if (path.includes('evaluate-upgrade')) {
+        transactionCost = 5.0; // Upgrade evaluation cost is 5 USDC
+      } else if (path.includes('micropayment')) {
+        transactionCost = parseFloat(req.body.amount) || 0.1;
+      }
+
+      const limit = parseFloat(sessionLimit);
+      if (isNaN(limit)) {
+        return res.status(401).json({ error: "Session key limit format invalid." });
+      }
+
+      const db = readDb();
+      if (!db.sessionSpent) db.sessionSpent = {};
+      const spent = db.sessionSpent[sessionAuthSig] || 0.0;
+
+      if (spent + transactionCost > limit) {
+        return res.status(401).json({
+          error: `Session key spending limit exceeded. Budget: ${limit.toFixed(2)}, Already spent: ${spent.toFixed(2)}, Requested: ${transactionCost.toFixed(2)}`
+        });
+      }
+
+      // Update database session key spent record
+      db.sessionSpent[sessionAuthSig] = parseFloat((spent + transactionCost).toFixed(2));
+      writeDb(db);
+
+      req.ownerAddress = ownerAddress.toLowerCase();
+      req.isSessionKey = true;
+    } else {
+      // Standard signature validation (direct owner signing)
+      if (recoveredSigner.toLowerCase() !== ownerAddress.toLowerCase()) {
+        return res.status(401).json({ error: "Signature verification failed: unauthorized wallet." });
+      }
+      req.ownerAddress = recoveredSigner.toLowerCase();
+      req.isSessionKey = false;
     }
-    req.ownerAddress = recoveredAddress.toLowerCase();
+    
     next();
   } catch (err) {
     return res.status(401).json({ error: `Invalid signature: ${err.message}` });
@@ -529,7 +622,7 @@ app.post('/api/battles', expensiveRateLimiter, async (req, res) => {
 
 
 // Autonomous Gladiator Upgrade evaluation & execution (includes rate limit checks)
-app.post('/api/gladiators/:id/evaluate-upgrade', expensiveRateLimiter, async (req, res) => {
+app.post('/api/gladiators/:id/evaluate-upgrade', verifyOwnerSignature, expensiveRateLimiter, async (req, res) => {
   const { id } = req.params;
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
   const UPGRADE_COST = 5.0;
@@ -540,6 +633,11 @@ app.post('/api/gladiators/:id/evaluate-upgrade', expensiveRateLimiter, async (re
 
     if (!gladiator) {
       return res.status(404).json({ error: "Gladiator not found" });
+    }
+
+    // Verify ownership of the gladiator
+    if (gladiator.ownerAddress && gladiator.ownerAddress.toLowerCase() !== req.ownerAddress.toLowerCase()) {
+      return res.status(403).json({ error: "Forbidden: You do not own this gladiator." });
     }
 
     const balanceUSDC = await getUSDCBalance(gladiator.walletAddress);
@@ -652,12 +750,33 @@ app.post('/api/gladiators/:id/evaluate-upgrade', expensiveRateLimiter, async (re
   }
 });
 
-// Calculate battle odds and Kelly Criterion suggestions
+// Calculate battle odds and Kelly Criterion suggestions (x402 payment gated)
 app.post('/api/battles/predict', async (req, res) => {
   const { gladiatorAId, gladiatorBId } = req.body;
+  const paymentProof = req.headers['x-payment-proof'];
 
   if (!gladiatorAId || !gladiatorBId) {
     return res.status(400).json({ error: "Missing gladiator IDs for prediction calculations." });
+  }
+
+  // x402 Payment Gate Check
+  if (!paymentProof) {
+    return res.status(402).json({
+      error: "Payment required to access AI advisor predictions.",
+      fee: "0.1",
+      token: "USDC",
+      recipient: PLATFORM_FEE_ADDRESS
+    });
+  }
+
+  // Prevent double spending of paymentProof txHash
+  if (processedPayments.has(paymentProof)) {
+    return res.status(402).json({ error: "Payment proof transaction hash already spent." });
+  }
+
+  // Validate format
+  if (!paymentProof.startsWith('0x_x402_proof_')) {
+    return res.status(402).json({ error: "Invalid payment proof transaction hash." });
   }
 
   try {
@@ -668,6 +787,9 @@ app.post('/api/battles/predict', async (req, res) => {
     if (!gladA || !gladB) {
       return res.status(404).json({ error: "One or both gladiators not found." });
     }
+
+    // Record paymentProof as spent
+    processedPayments.add(paymentProof);
 
     // Win probability based on combat attributes
     const scoreA = gladA.stats.attack * 0.4 + gladA.stats.defense * 0.3 + gladA.stats.speed * 0.3;
@@ -827,6 +949,58 @@ app.post('/api/user/fund', async (req, res) => {
     res.json({ success: true, balance: newBalance, token: tokenSymbol, message: `${amountNum} ${tokenSymbol} credited to your spectator wallet!` });
   } catch (err) {
     sendSanitizedError(res, err, "Failed to fund spectator balance.");
+  }
+});
+
+// Perform a mock x402 micropayment (deducts USDC/EURC from spectator ledger, returns mock txHash)
+app.post('/api/user/micropayment', verifyOwnerSignature, async (req, res) => {
+  const userAddress = req.ownerAddress; // Verified via verifyOwnerSignature
+  const { amount, token } = req.body;
+
+  if (!userAddress || !ethers.isAddress(userAddress)) {
+    return res.status(400).json({ error: "Invalid userAddress." });
+  }
+
+  const amountNum = parseFloat(amount || 0.1);
+  if (isNaN(amountNum) || amountNum <= 0) {
+    return res.status(400).json({ error: "Invalid micropayment amount." });
+  }
+
+  const tokenSymbol = token || 'USDC';
+  const normalizedAddress = userAddress.toLowerCase();
+
+  try {
+    const db = readDb();
+    
+    // Check balance
+    const currentBalance = tokenSymbol === 'EURC' 
+      ? (db.ledgerEURC[normalizedAddress] || 0.0) 
+      : (db.ledger[normalizedAddress] || 0.0);
+
+    if (currentBalance < amountNum) {
+      return res.status(400).json({ error: `Insufficient balance to pay x402 fee of ${amountNum} ${tokenSymbol}. Please fund your wallet first.` });
+    }
+
+    // Deduct fee & credit to Platform Fee Address
+    const treasuryAddr = PLATFORM_FEE_ADDRESS.toLowerCase();
+    if (tokenSymbol === 'EURC') {
+      db.ledgerEURC[normalizedAddress] = parseFloat((currentBalance - amountNum).toFixed(2));
+      db.ledgerEURC[treasuryAddr] = parseFloat(((db.ledgerEURC[treasuryAddr] || 0.0) + amountNum).toFixed(2));
+    } else {
+      db.ledger[normalizedAddress] = parseFloat((currentBalance - amountNum).toFixed(2));
+      db.ledger[treasuryAddr] = parseFloat(((db.ledger[treasuryAddr] || 0.0) + amountNum).toFixed(2));
+    }
+    
+    writeDb(db);
+
+    const txHash = `0x_x402_proof_${Date.now()}_${ethers.hexlify(ethers.randomBytes(16)).slice(2)}`;
+    res.json({
+      success: true,
+      txHash,
+      message: `x402 fee of ${amountNum} ${tokenSymbol} settled dynamically.`
+    });
+  } catch (err) {
+    sendSanitizedError(res, err, "Failed to process micropayment.");
   }
 });
 
