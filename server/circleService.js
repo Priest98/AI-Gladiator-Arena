@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { ethers } from 'ethers';
 import dotenv from 'dotenv';
+import { spawnSync } from 'child_process';
 
 dotenv.config();
 
@@ -13,8 +14,63 @@ const DB_FILE = process.env.VERCEL === '1'
   ? '/tmp/database.json'
   : path.join(__dirname, 'database.json');
 
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://yuxuaoozddubwhkvyzjz.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+
 // Initialize database
 function readDb() {
+  if (SUPABASE_KEY) {
+    try {
+      const args = [
+        '-s',
+        '-X', 'GET',
+        `${SUPABASE_URL}/rest/v1/app_state?id=eq.1&select=state`,
+        '-H', `apikey: ${SUPABASE_KEY}`,
+        '-H', `Authorization: Bearer ${SUPABASE_KEY}`
+      ];
+      const res = spawnSync('curl', args, { encoding: 'utf8' });
+      if (res.error) throw res.error;
+      const parsed = JSON.parse(res.stdout);
+      if (parsed && parsed.length > 0 && parsed[0].state) {
+        const data = parsed[0].state;
+        if (!data.ledgerEURC) data.ledgerEURC = {};
+        if (!data.activeBets) data.activeBets = [];
+        if (!data.tournaments) data.tournaments = [];
+        if (!data.policyLog) data.policyLog = [];
+        
+        // Ensure all existing gladiators have properties initialized
+        let changed = false;
+        data.gladiators.forEach(g => {
+          if (g.role === 'Cyber-Samurai') { g.role = 'Cyber-Dimachaerus'; changed = true; }
+          if (g.role === 'Netrunner') { g.role = 'Cyber-Retiarius'; changed = true; }
+          if (g.role === 'Mech-Tank') { g.role = 'Cyber-Murmillo'; changed = true; }
+
+          if (!g.equipment) { g.equipment = []; changed = true; }
+          if (!g.stakingPool) {
+            g.stakingPool = { totalStaked: 0.0, stakers: {} };
+            changed = true;
+          }
+          if (!g.financialLedger) { g.financialLedger = []; changed = true; }
+          if (!g.syndicate) {
+            g.syndicate = { sponsoredRookies: [], parentSponsor: null };
+            changed = true;
+          }
+          if (!g.personality) {
+            const personalities = ["Degen-Rogue", "Noble-Samurai", "Stoic-Mech", "Savage-Berserker"];
+            g.personality = personalities[Math.floor(Math.random() * personalities.length)];
+            changed = true;
+          }
+        });
+        if (changed) {
+          writeDb(data);
+        }
+        return data;
+      }
+    } catch (err) {
+      console.error("[CircleService] Supabase readDb failed, falling back to local file:", err);
+    }
+  }
+
   if (!fs.existsSync(DB_FILE)) {
     fs.writeFileSync(DB_FILE, JSON.stringify({ gladiators: [], battles: [], ledger: {}, ledgerEURC: {}, activeBets: [], tournaments: [], policyLog: [] }, null, 2));
   }
@@ -25,11 +81,9 @@ function readDb() {
     if (!data.tournaments) data.tournaments = [];
     if (!data.policyLog) data.policyLog = [];
 
-    
     // Ensure all existing gladiators have properties initialized
     let changed = false;
     data.gladiators.forEach(g => {
-      // Migrate legacy roles to historical ones
       if (g.role === 'Cyber-Samurai') { g.role = 'Cyber-Dimachaerus'; changed = true; }
       if (g.role === 'Netrunner') { g.role = 'Cyber-Retiarius'; changed = true; }
       if (g.role === 'Mech-Tank') { g.role = 'Cyber-Murmillo'; changed = true; }
@@ -60,6 +114,25 @@ function readDb() {
 }
 
 function writeDb(data) {
+  if (SUPABASE_KEY) {
+    try {
+      const args = [
+        '-s',
+        '-X', 'PATCH',
+        `${SUPABASE_URL}/rest/v1/app_state?id=eq.1`,
+        '-H', `apikey: ${SUPABASE_KEY}`,
+        '-H', `Authorization: Bearer ${SUPABASE_KEY}`,
+        '-H', 'Content-Type: application/json',
+        '-d', JSON.stringify({ state: data, updated_at: new Date().toISOString() })
+      ];
+      const res = spawnSync('curl', args, { encoding: 'utf8' });
+      if (res.error) throw res.error;
+      return;
+    } catch (err) {
+      console.error("[CircleService] Supabase writeDb failed, falling back to local file:", err);
+    }
+  }
+
   fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
 }
 
