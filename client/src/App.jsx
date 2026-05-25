@@ -47,22 +47,32 @@ async function apiFetch(url, options = {}) {
             }
           }
           
-          // Fallback to MetaMask if no session key is active
-          if (!ownerAddress && window.ethereum?.selectedAddress) {
-            ownerAddress = window.ethereum.selectedAddress;
-            const timestamp = Date.now();
-            const message = `Authorize micropayment of ${errData.fee} ${errData.token || 'USDC'} for x402 payment at timestamp ${timestamp}`;
-            const signature = await window.ethereum.request({
-              method: 'personal_sign',
-              params: [message, ownerAddress]
-            });
-            
-            payHeaders = {
-              ...payHeaders,
-              'x-signature': signature,
-              'x-message': message,
-              'x-owner-address': ownerAddress
-            };
+          // Fallback to active browser wallet if no session key is active
+          const provider = window.activeEthereumProvider || window.ethereum;
+          if (!ownerAddress && provider) {
+            let accounts = [];
+            try {
+              accounts = await provider.request({ method: 'eth_accounts' });
+            } catch (e) {
+              console.warn("Failed to get eth_accounts in apiFetch:", e);
+            }
+            const address = accounts[0] || provider.selectedAddress;
+            if (address) {
+              ownerAddress = address;
+              const timestamp = Date.now();
+              const message = `Authorize micropayment of ${errData.fee} ${errData.token || 'USDC'} for x402 payment at timestamp ${timestamp}`;
+              const signature = await provider.request({
+                method: 'personal_sign',
+                params: [message, ownerAddress]
+              });
+              
+              payHeaders = {
+                ...payHeaders,
+                'x-signature': signature,
+                'x-message': message,
+                'x-owner-address': ownerAddress
+              };
+            }
           }
           
           if (ownerAddress) {
@@ -200,64 +210,114 @@ export default function App() {
   const [sessionKeyDuration, setSessionKeyDuration] = useState('60');
   const [isAuthorizingSession, setIsAuthorizingSession] = useState(false);
 
-  // Initialize
+  // Multi-Wallet EIP-6963 States
+  const [providers, setProviders] = useState([]);
+  const [selectedProvider, setSelectedProvider] = useState(null);
+  const [showWalletModal, setShowWalletModal] = useState(false);
+
+  // Announce/Discover EIP-6963 providers on mount
+  useEffect(() => {
+    const handleAnnounce = (event) => {
+      const { info, provider } = event.detail;
+      setProviders(prev => {
+        if (prev.some(p => p.info.uuid === info.uuid)) return prev;
+        return [...prev, { info, provider }];
+      });
+    };
+    window.addEventListener("eip6963:announceProvider", handleAnnounce);
+    window.dispatchEvent(new Event("eip6963:requestProvider"));
+    return () => {
+      window.removeEventListener("eip6963:announceProvider", handleAnnounce);
+    };
+  }, []);
+
+  const disconnectWallet = () => {
+    setUserWallet(null);
+    setUserBalance(null);
+    setSelectedProvider(null);
+    window.activeEthereumProvider = null;
+    localStorage.removeItem('arcade_selected_wallet_uuid');
+  };
+
+  const connectWalletWithProvider = async (p) => {
+    setShowWalletModal(false);
+    if (!p) {
+      window.activeEthereumProvider = window.ethereum;
+      setSelectedProvider(null);
+      localStorage.removeItem('arcade_selected_wallet_uuid');
+    } else {
+      window.activeEthereumProvider = p.provider;
+      setSelectedProvider(p);
+      localStorage.setItem('arcade_selected_wallet_uuid', p.info.uuid);
+    }
+    await connectBrowserWallet();
+  };
+
+  // Initialize data on mount
   useEffect(() => {
     fetchGladiators();
     fetchHistory();
     fetchPredictorBalance();
     fetchActiveTournament();
     fetchPolicyStats();
-    if (window.ethereum) {
-      window.ethereum.request({ method: 'eth_accounts' })
-        .then(async (accounts) => {
-          if (accounts && accounts.length > 0) {
-            setUserWallet(accounts[0]);
-            updateBrowserBalance(accounts[0]);
-            fetchSpectatorBalance(accounts[0]);
-            try {
-              const chainId = await window.ethereum.request({ method: 'eth_chainId' });
-              setCurrentChainId(chainId);
-            } catch (err) {
-              console.error("Failed to fetch chainId on mount:", err);
-            }
-          }
-        }).catch(err => console.error(err));
-
-      const handleAccounts = (accs) => {
-        if (accs.length > 0) {
-          setUserWallet(accs[0]);
-          updateBrowserBalance(accs[0]);
-        } else {
-          setUserWallet(null);
-          setUserBalance(null);
-          setCurrentChainId(null);
-        }
-      };
-
-      const handleChain = (newChainId) => {
-        setCurrentChainId(newChainId);
-        window.location.reload();
-      };
-
-      window.ethereum.on('accountsChanged', handleAccounts);
-      window.ethereum.on('chainChanged', handleChain);
-
-      return () => {
-        if (window.ethereum.removeListener) {
-          window.ethereum.removeListener('accountsChanged', handleAccounts);
-          window.ethereum.removeListener('chainChanged', handleChain);
-        }
-        if (battleIntervalRef.current) {
-          clearInterval(battleIntervalRef.current);
-        }
-      };
-    }
     return () => {
       if (battleIntervalRef.current) {
         clearInterval(battleIntervalRef.current);
       }
     };
   }, []);
+
+  // Initialize wallet connection state on mount or provider load
+  useEffect(() => {
+    const initWallet = async () => {
+      const storedUuid = localStorage.getItem('arcade_selected_wallet_uuid');
+      let provider = window.ethereum;
+
+      if (storedUuid && providers.length > 0) {
+        const matched = providers.find(p => p.info.uuid === storedUuid);
+        if (matched) {
+          provider = matched.provider;
+          window.activeEthereumProvider = provider;
+          setSelectedProvider(matched);
+        }
+      }
+
+      if (provider) {
+        try {
+          const accounts = await provider.request({ method: 'eth_accounts' });
+          if (accounts && accounts.length > 0) {
+            setUserWallet(accounts[0]);
+            updateBrowserBalance(accounts[0]);
+            fetchSpectatorBalance(accounts[0]);
+            const chainId = await provider.request({ method: 'eth_chainId' });
+            setCurrentChainId(chainId);
+            
+            // Wire listeners
+            const handleAccounts = (accs) => {
+              if (accs.length > 0) {
+                setUserWallet(accs[0]);
+                updateBrowserBalance(accs[0]);
+              } else {
+                disconnectWallet();
+              }
+            };
+            const handleChain = (newChainId) => {
+              setCurrentChainId(newChainId);
+              window.location.reload();
+            };
+            if (provider.on) {
+              provider.on('accountsChanged', handleAccounts);
+              provider.on('chainChanged', handleChain);
+            }
+          }
+        } catch (err) {
+          console.error("Failed to initialize wallet on mount:", err);
+        }
+      }
+    };
+
+    initWallet();
+  }, [providers]);
 
   const fetchPolicyStats = async () => {
     try {
@@ -315,7 +375,11 @@ export default function App() {
       throw new Error("Wallet not connected");
     }
     
-    const signature = await window.ethereum.request({
+    const provider = window.activeEthereumProvider || window.ethereum;
+    if (!provider) {
+      throw new Error("No Ethereum provider available");
+    }
+    const signature = await provider.request({
       method: 'personal_sign',
       params: [message, userWallet]
     });
@@ -378,7 +442,11 @@ export default function App() {
         message: value
       });
 
-      const authSig = await window.ethereum.request({
+      const provider = window.activeEthereumProvider || window.ethereum;
+      if (!provider) {
+        throw new Error("No Ethereum provider available");
+      }
+      const authSig = await provider.request({
         method: 'eth_signTypedData_v4',
         params: [userWallet, msgParams]
       });
@@ -572,8 +640,9 @@ export default function App() {
   };
 
   const connectBrowserWallet = async () => {
-    if (!window.ethereum) {
-      alert("No Ethereum browser extension detected.");
+    const provider = window.activeEthereumProvider || window.ethereum;
+    if (!provider) {
+      alert("No Ethereum browser wallet detected.");
       return;
     }
     try {
@@ -593,15 +662,15 @@ export default function App() {
       const targetRpcUrl = configData.rpcUrl;
       const arcChainIdHex = configData.chainId || '0x4ce946';
 
-      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      const accounts = await provider.request({ method: 'eth_requestAccounts' });
       const address = accounts[0];
       
-      const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
+      const chainIdHex = await provider.request({ method: 'eth_chainId' });
       setCurrentChainId(chainIdHex);
       
       if (chainIdHex !== arcChainIdHex) {
         try {
-          await window.ethereum.request({
+          await provider.request({
             method: 'wallet_switchEthereumChain',
             params: [{ chainId: arcChainIdHex }]
           });
@@ -609,7 +678,7 @@ export default function App() {
         } catch (switchError) {
           // Fallback to add chain for any error (resilient on both desktop and mobile wallets)
           try {
-            await window.ethereum.request({
+            await provider.request({
               method: 'wallet_addEthereumChain',
               params: [{
                 chainId: arcChainIdHex,
@@ -629,6 +698,24 @@ export default function App() {
       setUserWallet(address);
       updateBrowserBalance(address);
       fetchSpectatorBalance(address);
+
+      // Listeners
+      const handleAccounts = (accs) => {
+        if (accs.length > 0) {
+          setUserWallet(accs[0]);
+          updateBrowserBalance(accs[0]);
+        } else {
+          disconnectWallet();
+        }
+      };
+      const handleChain = (newChainId) => {
+        setCurrentChainId(newChainId);
+        window.location.reload();
+      };
+      if (provider.on) {
+        provider.on('accountsChanged', handleAccounts);
+        provider.on('chainChanged', handleChain);
+      }
       
     } catch (err) {
       alert(`Wallet Connection Error: ${err.message}`);
@@ -636,9 +723,10 @@ export default function App() {
   };
 
   const updateBrowserBalance = async (address) => {
-    if (!window.ethereum || !address) return;
+    const provider = window.activeEthereumProvider || window.ethereum;
+    if (!provider || !address) return;
     try {
-      const balanceHex = await window.ethereum.request({
+      const balanceHex = await provider.request({
         method: 'eth_getBalance',
         params: [address, 'latest']
       });
@@ -661,8 +749,9 @@ export default function App() {
     setIsFunding(true);
     try {
       const valueHex = '0x' + (BigInt(Math.floor(amountNum * 1e6)) * BigInt(1e12)).toString(16);
+      const provider = window.activeEthereumProvider || window.ethereum;
       
-      const txHash = await window.ethereum.request({
+      const txHash = await provider.request({
         method: 'eth_sendTransaction',
         params: [{
           from: userWallet,
@@ -708,8 +797,9 @@ export default function App() {
     try {
       const timestamp = Date.now();
       const message = `Authorize withdrawal of ${amountNum} USDC for gladiator ${gladiatorId} to ${userWallet} at timestamp ${timestamp}`;
+      const provider = window.activeEthereumProvider || window.ethereum;
       
-      const signature = await window.ethereum.request({
+      const signature = await provider.request({
         method: 'personal_sign',
         params: [message, userWallet]
       });
@@ -905,7 +995,8 @@ export default function App() {
       // Signature verified gladiator retirements
       const timestamp = Date.now();
       const message = `Authorize retirement of gladiator ${glad.id} at timestamp ${timestamp}`;
-      const signature = await window.ethereum.request({
+      const provider = window.activeEthereumProvider || window.ethereum;
+      const signature = await provider.request({
         method: 'personal_sign',
         params: [message, userWallet]
       });
@@ -1321,7 +1412,8 @@ export default function App() {
     try {
       const timestamp = Date.now();
       const message = `Authorize unstaking of ${amountNum} ${token} from Gladiator ${glad.id} at timestamp ${timestamp}`;
-      const signature = await window.ethereum.request({
+      const provider = window.activeEthereumProvider || window.ethereum;
+      const signature = await provider.request({
         method: 'personal_sign',
         params: [message, userWallet]
       });
@@ -1383,7 +1475,8 @@ export default function App() {
     try {
       const timestamp = Date.now();
       const message = `Authorize syndicate sponsorship: Gladiator ${sponsorGlad.id} sponsors rookie ${rookieToSponsor} for 20.0 USDC at timestamp ${timestamp}`;
-      const signature = await window.ethereum.request({
+      const provider = window.activeEthereumProvider || window.ethereum;
+      const signature = await provider.request({
         method: 'personal_sign',
         params: [message, userWallet]
       });
@@ -1710,7 +1803,7 @@ export default function App() {
         <p className="app-subtitle">USDC-Backed Autonomous AI Gladiator Arena | settled on <span>Arc L1</span></p>
         <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
           {!userWallet ? (
-            <button className="btn btn-secondary btn-small" style={{ width: 'auto', padding: '0.6rem 1.2rem' }} onClick={connectBrowserWallet}>
+            <button className="btn btn-secondary btn-small" style={{ width: 'auto', padding: '0.6rem 1.2rem' }} onClick={() => setShowWalletModal(true)}>
               🔌 CONNECT BROWSER WALLET
             </button>
           ) : currentChainId && currentChainId !== '0x4ce946' ? (
@@ -1721,6 +1814,16 @@ export default function App() {
             <div className="gladiator-role-tag role-netrunner" style={{ fontSize: '0.75rem', padding: '0.5rem 1rem', display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
               <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#00ff00', display: 'inline-block' }}></span>
               WALLET: {userWallet.slice(0, 6)}...{userWallet.slice(-4)} | {userBalance} USDC (Arc L1)
+              {selectedProvider && (
+                <img src={selectedProvider.info.icon} alt={selectedProvider.info.name} style={{ width: '16px', height: '16px', marginLeft: '0.3rem', borderRadius: '2px', objectFit: 'contain' }} />
+              )}
+              <span 
+                style={{ marginLeft: '0.6rem', color: '#ff5252', cursor: 'pointer', fontWeight: 'bold' }} 
+                onClick={disconnectWallet}
+                title="Disconnect wallet"
+              >
+                ✕
+              </span>
             </div>
           )}
         </div>
@@ -2793,6 +2896,89 @@ export default function App() {
         {/* ── END POLICY ENGINE DASHBOARD ─────────────────────────────────── */}
 
       </main>
-    </div>
-  );
+
+      {/* Wallet Selection Modal */}
+      {showWalletModal && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(10px)',
+          display: 'flex', justifyContent: 'center', alignItems: 'center',
+          zIndex: 99999
+        }} onClick={() => setShowWalletModal(false)}>
+          <div style={{
+            background: 'linear-gradient(135deg, #141722 0%, #0d0f14 100%)',
+            border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: '12px', padding: '1.8rem', width: '90%', maxWidth: '380px',
+            textAlign: 'center', boxShadow: '0 20px 40px rgba(0,0,0,0.6)'
+          }} onClick={e => e.stopPropagation()}>
+            <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1.05rem', color: '#fff', letterSpacing: '0.05em' }}>SELECT A WALLET</h3>
+            <p style={{ margin: '0 0 1.5rem 0', fontSize: '0.75rem', color: 'var(--text-muted)' }}>Choose your preferred browser extension</p>
+            
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              {providers.map((p) => (
+                <button
+                  key={p.info.uuid}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '1rem',
+                    padding: '0.8rem 1rem', background: 'rgba(255,255,255,0.03)',
+                    border: '1px solid rgba(255,255,255,0.06)', borderRadius: '8px',
+                    color: '#fff', fontSize: '0.85rem', cursor: 'pointer',
+                    transition: 'all 0.2s ease', textAlign: 'left', fontWeight: 'bold'
+                  }}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
+                    e.currentTarget.style.borderColor = 'var(--yellow)';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
+                    e.currentTarget.style.borderColor = 'rgba(255,255,255,0.06)';
+                  }}
+                  onClick={() => connectWalletWithProvider(p)}
+                >
+                  <img src={p.info.icon} alt={p.info.name} style={{ width: '28px', height: '28px', borderRadius: '4px', objectFit: 'contain' }} />
+                  <span style={{ flexGrow: 1 }}>{p.info.name}</span>
+                  <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)', background: 'rgba(255,255,255,0.05)', padding: '0.2rem 0.4rem', borderRadius: '4px' }}>Detected</span>
+                </button>
+              ))}
+
+              {/* Fallback Option */}
+              <button
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '1rem',
+                  padding: '0.8rem 1rem', background: 'rgba(255,255,255,0.02)',
+                  border: '1px solid rgba(255,255,255,0.04)', borderRadius: '8px',
+                  color: 'var(--text-secondary)', fontSize: '0.85rem', cursor: 'pointer',
+                  transition: 'all 0.2s ease', textAlign: 'left'
+                }}
+                onMouseEnter={e => {
+                  e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+                  e.currentTarget.style.borderColor = 'rgba(255,255,255,0.15)';
+                }}
+                onMouseLeave={e => {
+                  e.currentTarget.style.background = 'rgba(255,255,255,0.02)';
+                  e.currentTarget.style.borderColor = 'rgba(255,255,255,0.04)';
+                }}
+                onClick={() => connectWalletWithProvider(null)}
+              >
+                <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: 'rgba(255,255,255,0.08)', display: 'flex', justifyContent: 'center', alignItems: 'center', fontSize: '1rem' }}>🔌</div>
+                <span style={{ flexGrow: 1 }}>Default Injected Wallet</span>
+              </button>
+            </div>
+
+            <button
+              style={{
+                marginTop: '1.5rem', width: '100%', padding: '0.6rem',
+                background: 'rgba(255,50,50,0.1)', border: '1px solid rgba(255,50,50,0.2)',
+                borderRadius: '6px', color: '#ff6b6b', fontSize: '0.75rem',
+                cursor: 'pointer', fontWeight: 'bold'
+              }}
+              onClick={() => setShowWalletModal(false)}
+            >
+              CLOSE
+            </button>
+          </div>
+        </div>
+      )}
+  </div>
+);
 }
