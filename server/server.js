@@ -38,7 +38,7 @@ app.use(cors({
       return callback(null, true);
     }
     const isLocalhost = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
-    const isVercel = /^https:\/\/ai-gladiator-arena(-[a-z0-9]+)?\.vercel\.app$/.test(origin);
+    const isVercel = /\.vercel\.app$/.test(origin);
     if (isLocalhost || isVercel || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
@@ -838,13 +838,10 @@ app.get('/api/user/balance/:address', async (req, res) => {
     return res.status(400).json({ error: "Invalid wallet address format." });
   }
 
-  const normalizedAddress = address.toLowerCase();
-
   try {
-    const db = readDb();
-    const usdc = db.ledger[normalizedAddress] || 0.0;
-    const eurc = db.ledgerEURC[normalizedAddress] || 0.0;
-    res.json({ address: normalizedAddress, usdc, eurc });
+    const usdc = await getUSDCBalance(address);
+    const eurc = await getEURCBalance(address);
+    res.json({ address: address.toLowerCase(), usdc, eurc });
   } catch (err) {
     sendSanitizedError(res, err, "Failed to fetch user balance.");
   }

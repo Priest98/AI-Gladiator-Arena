@@ -135,38 +135,29 @@ export default function App() {
 
   const fetchPredictorBalance = async () => {
     try {
-      const res = await fetch(`${API_BASE}/predictor/balance`);
-      if (res.ok) {
-        const data = await res.json();
-        setPredictorBalance({ usdc: data.usdc, eurc: data.eurc });
-      }
+      const { ok, data } = await apiFetch(`${API_BASE}/predictor/balance`);
+      if (ok) setPredictorBalance({ usdc: data.usdc, eurc: data.eurc });
     } catch (err) {
-      console.error("Failed to fetch predictor balance:", err);
+      console.error("Failed to fetch predictor balance:", err.message);
     }
   };
 
   const fetchSpectatorBalance = async (address) => {
     if (!address) return;
     try {
-      const res = await fetch(`${API_BASE}/user/balance/${address}`);
-      if (res.ok) {
-        const data = await res.json();
-        setSpectatorBalance({ usdc: data.usdc, eurc: data.eurc });
-      }
+      const { ok, data } = await apiFetch(`${API_BASE}/user/balance/${address}`);
+      if (ok) setSpectatorBalance({ usdc: data.usdc, eurc: data.eurc });
     } catch (err) {
-      console.error("Failed to fetch spectator balance:", err);
+      console.error("Failed to fetch spectator balance:", err.message);
     }
   };
 
   const fetchActiveTournament = async () => {
     try {
-      const res = await fetch(`${API_BASE}/tournaments/active`);
-      if (res.ok) {
-        const data = await res.json();
-        setActiveTournament(data);
-      }
+      const { ok, data } = await apiFetch(`${API_BASE}/tournaments/active`);
+      if (ok) setActiveTournament(data);
     } catch (err) {
-      console.error("Failed to fetch active tournament:", err);
+      console.error("Failed to fetch active tournament:", err.message);
     }
   };
 
@@ -174,20 +165,19 @@ export default function App() {
     if (!userWallet || isFundingSpectator) return;
     setIsFundingSpectator(true);
     try {
-      const res = await fetch(`${API_BASE}/user/fund`, {
+      const { ok, data } = await apiFetch(`${API_BASE}/user/fund`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userAddress: userWallet, amount: 100, token: betToken })
       });
-      const data = await res.json();
-      if (res.ok) {
+      if (ok) {
         alert(data.message);
         fetchSpectatorBalance(userWallet);
       } else {
         alert(`Funding failed: ${data.error}`);
       }
     } catch (err) {
-      alert(`Network error: Cannot reach server.`);
+      alert(`Network error: ${err.message}`);
     } finally {
       setIsFundingSpectator(false);
     }
@@ -198,18 +188,17 @@ export default function App() {
     setIsClaimingFaucet(true);
     setFaucetCooldown(null);
     try {
-      const res = await fetch(`${API_BASE}/arc-faucet`, {
+      const { ok, status, data } = await apiFetch(`${API_BASE}/arc-faucet`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ address: userWallet, token: faucetToken })
       });
-      const data = await res.json();
-      if (res.ok) {
+      if (ok) {
         setFaucetMode(data.mode);
         alert(data.message);
         fetchSpectatorBalance(userWallet);
         updateBrowserBalance(userWallet);
-      } else if (res.status === 429) {
+      } else if (status === 429) {
         setFaucetCooldown(data.cooldownMinutes);
         alert(`⏳ ${data.error}`);
       } else {
@@ -233,17 +222,14 @@ export default function App() {
 
   const fetchPrediction = async (gladAId, gladBId) => {
     try {
-      const res = await fetch(`${API_BASE}/battles/predict`, {
+      const { ok, data } = await apiFetch(`${API_BASE}/battles/predict`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ gladiatorAId: gladAId, gladiatorBId: gladBId })
       });
-      if (res.ok) {
-        const data = await res.json();
-        setPredictionData(data);
-      }
+      if (ok) setPredictionData(data);
     } catch (err) {
-      console.error("Failed to fetch predictions:", err);
+      console.error("Failed to fetch predictions:", err.message);
     }
   };
 
@@ -428,7 +414,7 @@ export default function App() {
         params: [message, userWallet]
       });
 
-      const res = await fetch(`${API_BASE}/withdraw`, {
+      const { ok, data } = await apiFetch(`${API_BASE}/withdraw`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -442,9 +428,7 @@ export default function App() {
           amount: amountNum
         })
       });
-      const data = await res.json();
-      
-      if (res.ok) {
+      if (ok) {
         alert(`Withdrawal successful! Tx Hash: ${data.txHash}`);
         fetchGladiators();
         updateBrowserBalance(userWallet);
@@ -479,7 +463,7 @@ export default function App() {
         params: [message, userWallet]
       });
 
-      const res = await fetch(`${API_BASE}/bets`, {
+      const { ok, data } = await apiFetch(`${API_BASE}/bets`, {
          method: 'POST',
          headers: { 
            'Content-Type': 'application/json',
@@ -493,8 +477,7 @@ export default function App() {
            token: betToken
          })
       });
-      const data = await res.json();
-      if (res.ok) {
+      if (ok) {
         alert(data.message);
         setBetAmount('');
         fetchGladiators();
@@ -522,13 +505,11 @@ export default function App() {
     ]);
     
     try {
-      const res = await fetch(`${API_BASE}/gladiators/${gladiatorId}/evaluate-upgrade`, {
+      const { ok, data } = await apiFetch(`${API_BASE}/gladiators/${gladiatorId}/evaluate-upgrade`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });
-      const data = await res.json();
-      
-      if (res.ok) {
+      if (ok) {
         if (data.upgraded) {
           setConsoleLogs(prev => [
             ...prev,
@@ -562,7 +543,7 @@ export default function App() {
         }
         fetchGladiators();
       } else {
-        setConsoleLogs(prev => [...prev, `[Upgrade Fail] Error: ${data.error}`]);
+        setConsoleLogs(prev => [...prev, `[Upgrade Fail] Error: ${data?.error || 'Unknown error'}`]);
       }
     } catch (err) {
       setConsoleLogs(prev => [...prev, `[Upgrade Fail] Connection error: ${err.message}`]);
@@ -581,18 +562,16 @@ export default function App() {
         ...formData,
         ownerAddress: userWallet 
       };
-      const res = await fetch(`${API_BASE}/gladiators`, {
+      const { ok, data: newGlad } = await apiFetch(`${API_BASE}/gladiators`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      const newGlad = await res.json();
-      
-      if (res.ok) {
+      if (ok) {
         setFormData({ name: '', role: 'Cyber-Dimachaerus', strategy: 'Balanced', aggression: 50, defense: 30, speed: 20, customPrompt: '' });
         await fetchGladiators();
       } else {
-        alert(newGlad.error || 'Failed to create gladiator');
+        alert(newGlad?.error || 'Failed to create gladiator');
       }
     } catch (err) {
       console.error('Error creating gladiator:', err);
@@ -634,7 +613,7 @@ export default function App() {
         params: [message, userWallet]
       });
 
-      const res = await fetch(`${API_BASE}/gladiators/${glad.id}`, {
+      const { ok, data } = await apiFetch(`${API_BASE}/gladiators/${glad.id}`, {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
@@ -643,14 +622,12 @@ export default function App() {
           'x-owner-address': userWallet
         }
       });
-      const data = await res.json();
-
-      if (res.ok) {
+      if (ok) {
         if (selectedGladA?.id === glad.id) setSelectedGladA(null);
         if (selectedGladB?.id === glad.id) setSelectedGladB(null);
         await fetchGladiators();
       } else {
-        alert(`Could not retire gladiator: ${data.error}`);
+        alert(`Could not retire gladiator: ${data?.error}`);
       }
     } catch (err) {
       alert(`Error: ${err.message}`);
@@ -666,18 +643,16 @@ export default function App() {
     }
 
     try {
-      const res = await fetch(`${API_BASE}/gladiators/${glad.id}/mint`, {
+      const { ok, data } = await apiFetch(`${API_BASE}/gladiators/${glad.id}/mint`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userAddress: userWallet })
       });
-      const data = await res.json();
-
-      if (res.ok) {
+      if (ok) {
         alert(`Success! Minted Gladiator "${glad.name}" as an NFT.\nTx: ${data.nftTxHash}\nToken ID: ${data.nftTokenId}`);
         await fetchGladiators();
       } else {
-        alert(`NFT Minting failed: ${data.error}`);
+        alert(`NFT Minting failed: ${data?.error}`);
       }
     } catch (err) {
       alert(`Minting error: ${err.message}`);
@@ -1008,7 +983,7 @@ export default function App() {
 
     setIsStaking(true);
     try {
-      const res = await fetch(`${API_BASE}/gladiators/${glad.id}/stake`, {
+      const { ok, data } = await apiFetch(`${API_BASE}/gladiators/${glad.id}/stake`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1017,14 +992,13 @@ export default function App() {
           token
         })
       });
-      const data = await res.json();
-      if (res.ok) {
+      if (ok) {
         alert(data.message);
         setStakeAmount('');
         fetchGladiators();
         fetchSpectatorBalance(userWallet);
       } else {
-        alert(`Staking failed: ${data.error}`);
+        alert(`Staking failed: ${data?.error}`);
       }
     } catch (err) {
       alert(`Staking request failed: ${err.message}`);
@@ -1055,7 +1029,7 @@ export default function App() {
         params: [message, userWallet]
       });
 
-      const res = await fetch(`${API_BASE}/gladiators/${glad.id}/unstake`, {
+      const { ok, data } = await apiFetch(`${API_BASE}/gladiators/${glad.id}/unstake`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1068,14 +1042,13 @@ export default function App() {
           token
         })
       });
-      const data = await res.json();
-      if (res.ok) {
+      if (ok) {
         alert(data.message);
         setUnstakeAmount('');
         fetchGladiators();
         fetchSpectatorBalance(userWallet);
       } else {
-        alert(`Unstaking failed: ${data.error}`);
+        alert(`Unstaking failed: ${data?.error}`);
       }
     } catch (err) {
       alert(`Unstaking failed: ${err.message}`);
@@ -1089,17 +1062,16 @@ export default function App() {
     if (!glad) return;
 
     try {
-      const res = await fetch(`${API_BASE}/gladiators/${glad.id}/buy-gear`, {
+      const { ok, data } = await apiFetch(`${API_BASE}/gladiators/${glad.id}/buy-gear`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ itemId })
       });
-      const data = await res.json();
-      if (res.ok) {
+      if (ok) {
         alert(data.message);
         fetchGladiators();
       } else {
-        alert(`Purchase failed: ${data.error}`);
+        alert(`Purchase failed: ${data?.error}`);
       }
     } catch (err) {
       alert(`Gear purchase failed: ${err.message}`);
@@ -1119,7 +1091,7 @@ export default function App() {
         params: [message, userWallet]
       });
 
-      const res = await fetch(`${API_BASE}/syndicates/sponsor`, {
+      const { ok, data } = await apiFetch(`${API_BASE}/syndicates/sponsor`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1132,13 +1104,12 @@ export default function App() {
           rookieGladId: rookieToSponsor
         })
       });
-      const data = await res.json();
-      if (res.ok) {
+      if (ok) {
         alert(data.message);
         setRookieToSponsor('');
         fetchGladiators();
       } else {
-        alert(`Syndicate setup failed: ${data.error}`);
+        alert(`Syndicate setup failed: ${data?.error}`);
       }
     } catch (err) {
       alert(`Syndicate failed: ${err.message}`);
@@ -1150,17 +1121,16 @@ export default function App() {
   const handleCreateTournament = async () => {
     setIsCreatingTournament(true);
     try {
-      const res = await fetch(`${API_BASE}/tournaments`, {
+      const { ok, data } = await apiFetch(`${API_BASE}/tournaments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });
-      const data = await res.json();
-      if (res.ok) {
+      if (ok) {
         alert("8-Gladiator bracket tournament spawned! Visualizing bracket details.");
         setActiveTournament(data);
         fetchGladiators();
       } else {
-        alert(`Failed to create tournament: ${data.error}`);
+        alert(`Failed to create tournament: ${data?.error || 'Server error'}`);
       }
     } catch (err) {
       alert(`Tournament creation failed: ${err.message}`);
@@ -1173,12 +1143,11 @@ export default function App() {
     if (!activeTournament || isSteppingTournament) return;
     setIsSteppingTournament(true);
     try {
-      const res = await fetch(`${API_BASE}/tournaments/${activeTournament.id}/step`, {
+      const { ok, data } = await apiFetch(`${API_BASE}/tournaments/${activeTournament.id}/step`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });
-      const data = await res.json();
-      if (res.ok) {
+      if (ok) {
         setActiveTournament(data.tournament);
         
         // Select contestants
@@ -1196,7 +1165,7 @@ export default function App() {
           }, 500);
         }
       } else {
-        alert(`Failed to simulate step: ${data.error}`);
+        alert(`Failed to simulate step: ${data?.error || 'Server error'}`);
       }
     } catch (err) {
       alert(`Tournament step failed: ${err.message}`);
