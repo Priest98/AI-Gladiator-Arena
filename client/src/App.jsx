@@ -48,6 +48,7 @@ export default function App() {
   // Browser Wallet Connection
   const [userWallet, setUserWallet] = useState(null);
   const [userBalance, setUserBalance] = useState(null);
+  const [currentChainId, setCurrentChainId] = useState(null);
   const [fundingAmount, setFundingAmount] = useState('');
   const [withdrawingAmount, setWithdrawingAmount] = useState('');
   const [isFunding, setIsFunding] = useState(false);
@@ -105,13 +106,48 @@ export default function App() {
     fetchPolicyStats();
     if (window.ethereum) {
       window.ethereum.request({ method: 'eth_accounts' })
-        .then(accounts => {
+        .then(async (accounts) => {
           if (accounts && accounts.length > 0) {
             setUserWallet(accounts[0]);
             updateBrowserBalance(accounts[0]);
             fetchSpectatorBalance(accounts[0]);
+            try {
+              const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+              setCurrentChainId(chainId);
+            } catch (err) {
+              console.error("Failed to fetch chainId on mount:", err);
+            }
           }
         }).catch(err => console.error(err));
+
+      const handleAccounts = (accs) => {
+        if (accs.length > 0) {
+          setUserWallet(accs[0]);
+          updateBrowserBalance(accs[0]);
+        } else {
+          setUserWallet(null);
+          setUserBalance(null);
+          setCurrentChainId(null);
+        }
+      };
+
+      const handleChain = (newChainId) => {
+        setCurrentChainId(newChainId);
+        window.location.reload();
+      };
+
+      window.ethereum.on('accountsChanged', handleAccounts);
+      window.ethereum.on('chainChanged', handleChain);
+
+      return () => {
+        if (window.ethereum.removeListener) {
+          window.ethereum.removeListener('accountsChanged', handleAccounts);
+          window.ethereum.removeListener('chainChanged', handleChain);
+        }
+        if (battleIntervalRef.current) {
+          clearInterval(battleIntervalRef.current);
+        }
+      };
     }
     return () => {
       if (battleIntervalRef.current) {
@@ -287,6 +323,7 @@ export default function App() {
       const address = accounts[0];
       
       const chainIdHex = await window.ethereum.request({ method: 'eth_chainId' });
+      setCurrentChainId(chainIdHex);
       
       if (chainIdHex !== arcChainIdHex) {
         try {
@@ -294,8 +331,10 @@ export default function App() {
             method: 'wallet_switchEthereumChain',
             params: [{ chainId: arcChainIdHex }]
           });
+          setCurrentChainId(arcChainIdHex);
         } catch (switchError) {
-          if (switchError.code === 4902) {
+          // Fallback to add chain for any error (resilient on both desktop and mobile wallets)
+          try {
             await window.ethereum.request({
               method: 'wallet_addEthereumChain',
               params: [{
@@ -306,8 +345,9 @@ export default function App() {
                 blockExplorerUrls: [configData.blockExplorerUrl || 'https://testnet.arcscan.app']
               }]
             });
-          } else {
-            throw switchError;
+            setCurrentChainId(arcChainIdHex);
+          } catch (addError) {
+            throw new Error(`Could not add Arc Testnet to your wallet: ${addError.message}`);
           }
         }
       }
@@ -315,20 +355,6 @@ export default function App() {
       setUserWallet(address);
       updateBrowserBalance(address);
       fetchSpectatorBalance(address);
-      
-      window.ethereum.on('accountsChanged', (accs) => {
-        if (accs.length > 0) {
-          setUserWallet(accs[0]);
-          updateBrowserBalance(accs[0]);
-        } else {
-          setUserWallet(null);
-          setUserBalance(null);
-        }
-      });
-      
-      window.ethereum.on('chainChanged', () => {
-        window.location.reload();
-      });
       
     } catch (err) {
       alert(`Wallet Connection Error: ${err.message}`);
@@ -1424,6 +1450,10 @@ export default function App() {
           {!userWallet ? (
             <button className="btn btn-secondary btn-small" style={{ width: 'auto', padding: '0.6rem 1.2rem' }} onClick={connectBrowserWallet}>
               🔌 CONNECT BROWSER WALLET
+            </button>
+          ) : currentChainId && currentChainId !== '0x4ce946' ? (
+            <button className="btn btn-primary btn-small animate-pulse" style={{ width: 'auto', padding: '0.6rem 1.2rem', background: 'linear-gradient(135deg, #ff3f34, #ff5e57)', animation: 'pulse 2s infinite' }} onClick={connectBrowserWallet}>
+              ⚠️ SWITCH TO ARC TESTNET
             </button>
           ) : (
             <div className="gladiator-role-tag role-netrunner" style={{ fontSize: '0.75rem', padding: '0.5rem 1rem', display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
